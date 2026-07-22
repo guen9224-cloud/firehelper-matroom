@@ -131,6 +131,11 @@ footer{text-align:center;color:#999;font-size:12px;padding:18px 8px 34px}
 .st{display:inline-block;font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;margin-left:6px}
 .st.approved{background:#eaf6ec;color:#2e6b3a}.st.rejected{background:#fdecea;color:#a23b30}
 .rn{font-size:12px;color:#777;margin-top:4px}
+#ld{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;align-items:center;justify-content:center}
+.ldbox{background:#fff;padding:22px 28px;border-radius:14px;font-size:15px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.ldbox .sp{width:26px;height:26px;border:3px solid #eee;border-top-color:#c0392b;border-radius:50%;margin:0 auto 10px;animation:spin 0.8s linear infinite}
+.ldbox small{color:#999}
+@keyframes spin{to{transform:rotate(360deg)}}
 """
 
 
@@ -223,19 +228,23 @@ def maybe_compress(data: bytes, content_type: str, filename: str):
 
 
 def page_html(title: str, inner: str, focus: str = "") -> str:
-    js = ""
-    if True:
-        js = (
-            "<script>(function(){var p=new URLSearchParams(location.search).get('type');"
-            "if(!p)return;var el=document.querySelector('section[data-type=\"'+(window.CSS&&CSS.escape?CSS.escape(p):p)+'\"]');"
-            "if(el){el.scrollIntoView({behavior:'smooth',block:'start'});el.classList.add('hl');"
-            "setTimeout(function(){el.classList.remove('hl')},2600);}})();</script>"
-        )
+    js = (
+        "<script>(function(){var p=new URLSearchParams(location.search).get('type');"
+        "if(p){var el=document.querySelector('section[data-type=\"'+(window.CSS&&CSS.escape?CSS.escape(p):p)+'\"]');"
+        "if(el){el.scrollIntoView({behavior:'smooth',block:'start'});el.classList.add('hl');"
+        "setTimeout(function(){el.classList.remove('hl')},2600);}}"
+        "document.addEventListener('submit',function(e){var f=e.target;if(!f||f.tagName!=='FORM')return;"
+        "var ld=document.getElementById('ld');if(ld)ld.style.display='flex';"
+        "try{(e.submitter||f.querySelector('button[type=submit]')).disabled=true;}catch(_){}"
+        "},true);})();</script>"
+    )
+    overlay = ('<div id="ld"><div class="ldbox"><div class="sp"></div>'
+               '⏳ 처리 중이에요… 잠시만요<br><small>파일이 크면 시간이 걸릴 수 있어요</small></div></div>')
     return (
         '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{esc(title)}</title><style>{CSS}</style></head>"
-        f'<body><div class="wrap">{inner}</div>{js}</body></html>'
+        f'<body><div class="wrap">{inner}</div>{overlay}{js}</body></html>'
     )
 
 
