@@ -253,7 +253,6 @@ def page_html(title: str, inner: str, focus: str = "") -> str:
         "setTimeout(function(){el.classList.remove('hl')},2600);}}"
         "document.addEventListener('submit',function(e){var f=e.target;if(!f||f.tagName!=='FORM')return;"
         "var ld=document.getElementById('ld');if(ld)ld.style.display='flex';"
-        "try{(e.submitter||f.querySelector('button[type=submit]')).disabled=true;}catch(_){}"
         "},true);})();</script>"
     )
     overlay = ('<div id="ld"><div class="ldbox"><div class="sp"></div>'
