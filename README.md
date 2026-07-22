@@ -1,43 +1,42 @@
-# 제조사 자료실 (firehelper-matroom)
+# 제조사 자료실 (firehelper-matroom) — 2단계(위키형)
 
-소방 자재승인 제조사별 **자료실 웹페이지**를 서빙하는 render.com 웹서비스입니다.
-카톡 챗봇이 제조사 질문에 이 페이지 링크를 주면, 방문자는 제조사 정보 + 문서(카탈로그·형식승인서·시험성적서 등)를 보고 다운로드할 수 있습니다.
+소방 자재승인 제조사별 **자료실 웹페이지**입니다. 카톡 챗봇이 "📚 자료실 열기" 버튼으로 이 페이지로 보내주고,
+방문자는 제조사 정보 + 문서(카탈로그·형식승인서·시험성적서 등)를 보고 다운로드합니다.
 
-- 데이터는 Supabase의 `public.mat_find(q)` 함수(이미 배포됨)에서 가져옵니다.
-- 1단계: **읽기 전용** (정보 + 문서 보기/다운로드, 없는 유형 표시)
-- 2단계(예정): 연동 사용자 업로드 + 편집/삭제 요청 검토(위키형)
+- 데이터: Supabase `public.mat_find(q)` (배포됨)
+- **?type=<유형>** 딥링크: 요청한 유형 섹션으로 자동 스크롤·강조 (예: 카톡에서 "카탈로그 줘")
+- **?t=<토큰>** (카톡 연동 사용자): 자료 업로드 / 수정·삭제 요청 → **관리자 검토 후 반영**
+- **/admin?key=<ADMIN_SECRET>**: 대기 중 기여 목록 승인/반려
 
 ## 파일
-- `app.py` — FastAPI 앱 (페이지 렌더링)
-- `requirements.txt` — 의존성
+- `app.py` — FastAPI 앱 (페이지 + 업로드/요청 + 관리자 검토)
+- `requirements.txt` — 의존성 (fastapi, uvicorn, **python-multipart**)
 - `render.yaml` — render Blueprint (선택)
 
-## render.com 배포 (둘 중 하나)
-
-### 방법 A) Blueprint (가장 쉬움)
-1. 이 4개 파일을 GitHub 새 레포에 올립니다.
-2. render 대시보드 → **New → Blueprint** → 그 레포 선택.
-3. 배포 중 환경변수 2개를 입력합니다(아래).
-
-### 방법 B) 수동 Web Service
-1. render → **New → Web Service** → 레포 연결 (Runtime: Python).
-2. Build Command: `pip install -r requirements.txt`
-3. Start Command: `uvicorn app:app --host 0.0.0.0 --port $PORT`
-4. 환경변수 2개 입력.
+## 업데이트 방법 (이미 배포돼 있는 경우)
+1. 이 세 파일을 GitHub 레포 `firehelper-matroom`에 **덮어쓰기**로 올립니다(커밋).
+2. render가 자동으로 다시 배포합니다(1~2분).
+3. render 대시보드 → 서비스 → **Environment** 에 아래 환경변수를 추가하세요.
 
 ## 환경변수 (Environment)
 | Key | Value |
 |---|---|
 | `SUPABASE_URL` | `https://kfprlgsbvcndomcsjwct.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase 서비스 롤 키 (Settings → API → service_role) |
+| `ADMIN_SECRET` | **관리자 페이지 비밀키** (직접 정한 긴 임의 문자열, 예: `mat-admin-9x7k2p...`) |
 
-> 서비스 롤 키는 **서버에서만** 사용되고 브라우저엔 노출되지 않습니다. 코드에 넣지 말고 render 환경변수로만 넣으세요.
+> `ADMIN_SECRET`은 관리자 검토 페이지(`/admin?key=...`) 접근용입니다. 남에게 알려주지 마세요.
 
 ## 사용
-배포 후 URL 예시:
-- `https://firehelper-matroom.onrender.com/m/미도진흥`
-- 또는 `https://firehelper-matroom.onrender.com/?m=미도진흥`
+- 페이지: `https://firehelper-matroom.onrender.com/m/미도진흥`
+- 유형 딥링크: `.../m/미도진흥?type=카달로그`
+- 관리자: `https://firehelper-matroom.onrender.com/admin?key=<ADMIN_SECRET>`
 - 헬스체크: `/healthz`
 
-## 다음 단계
-배포되면 **그 URL을 알려주세요.** 제가 카톡 챗봇(mat-bot)이 제조사 응답에 "📚 자료실 열기" 링크를 함께 주도록 연결하고, 이어서 2단계(업로드·편집 검토)를 붙이겠습니다.
+## 기여 흐름(위키형)
+1. 방문자가 카톡 챗봇에서 "📚 자료실 열기"로 들어오면(연동 사용자면) 링크에 `?t=토큰`이 붙습니다.
+2. 각 유형 아래 "＋ 이 유형 자료 올리기"로 파일 업로드, 각 문서 옆 "수정·삭제 요청" 가능.
+3. 요청은 `material_test.contribution`에 `pending`으로 쌓이고, `/admin`에서 승인 시 자료실에 반영됩니다.
+   - 업로드 승인 → 문서 신규 등록(공개)
+   - 삭제 승인 → 해당 문서 숨김 처리(자료실에서 제외)
+   - 수정 승인 → 유형/제목 변경
