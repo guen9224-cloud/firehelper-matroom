@@ -16,10 +16,13 @@ render 시작 명령:  uvicorn app:app --host 0.0.0.0 --port $PORT
 import os
 import json
 import uuid
+import ssl
+import smtplib
 import html as _html
 import urllib.request
 import urllib.error
 import urllib.parse
+from email.message import EmailMessage
 
 from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -30,7 +33,39 @@ ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 BUCKET = "material-docs"
 MAX_UPLOAD = 25 * 1024 * 1024  # 25MB
 
+# 이메일 알림(SMTP). 미설정 시 조용히 건너뜀. Gmail 예: SMTP_HOST=smtp.gmail.com, SMTP_PORT=587,
+# SMTP_USER=본인지메일, SMTP_PASS=Google 앱 비밀번호, ADMIN_EMAIL=받을주소(미설정 시 SMTP_USER)
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or "587")
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "") or SMTP_USER
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://firehelper-matroom.onrender.com").rstrip("/")
+
 app = FastAPI(title="제조사 자료실")
+
+
+def notify_admin(subject: str, body: str) -> None:
+    """새 기여 요청이 들어오면 관리자에게 이메일. 실패해도 요청 처리엔 영향 없음."""
+    if not (SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
+        return
+    try:
+        msg = EmailMessage()
+        msg["From"] = SMTP_USER
+        msg["To"] = ADMIN_EMAIL
+        msg["Subject"] = subject
+        msg.set_content(body)
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=8) as s:
+            s.starttls(context=ctx)
+            s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(msg)
+    except Exception:
+        pass
+
+
+def admin_link() -> str:
+    return PUBLIC_BASE_URL + "/admin?key=" + urllib.parse.quote(ADMIN_SECRET, safe="")
 
 # doc_type -> 화면 라벨 (표시 순서)
 TYPES = [
@@ -86,6 +121,14 @@ footer{text-align:center;color:#999;font-size:12px;padding:18px 8px 34px}
 .adm .k{display:inline-block;font-size:11px;font-weight:700;color:#fff;background:#c0392b;border-radius:6px;padding:1px 7px;margin-right:6px}
 .adm .k.edit{background:#2980b9}.adm .k.delete{background:#7f8c8d}
 .admrow{display:flex;gap:8px;margin-top:8px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tab{text-decoration:none;font-size:13px;padding:7px 12px;border-radius:999px;background:#fff;color:#555;border:1px solid #e2e2e2}
+.tab.on{background:#c0392b;color:#fff;border-color:#c0392b}
+.filter{display:flex;gap:6px;margin-bottom:12px}
+.filter input{flex:1;font-size:13px;padding:8px;border:1px solid #ddd;border-radius:8px}
+.st{display:inline-block;font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;margin-left:6px}
+.st.approved{background:#eaf6ec;color:#2e6b3a}.st.rejected{background:#fdecea;color:#a23b30}
+.rn{font-size:12px;color:#777;margin-top:4px}
 """
 
 
@@ -382,6 +425,11 @@ async def do_upload(name: str, t: str = Form(""), doc_type: str = Form("기타")
         return _back(name, t, f"!요청 저장 실패: {e}")
     if isinstance(r, dict) and not r.get("ok"):
         return _back(name, t, "!" + str(r.get("error") or "요청 실패"))
+    notify_admin(
+        f"[자료실] 업로드 요청 · {info.get('name')} · {dict(TYPES).get(doc_type, doc_type)}",
+        f"제조사: {info.get('name')}\n유형: {dict(TYPES).get(doc_type, doc_type)}\n제목: {title or safe}\n"
+        f"파일: {purl}\n\n검토(승인/반려): {admin_link()}",
+    )
     return _back(name, t, "📩 업로드 요청이 접수됐어요. 관리자 검토 후 자료실에 반영됩니다. 감사합니다!")
 
 
@@ -414,51 +462,108 @@ async def do_request(name: str, t: str = Form(""), kind: str = Form("edit"),
     if isinstance(r, dict) and not r.get("ok"):
         return _back(name, t, "!" + str(r.get("error") or "요청 실패"))
     label = "삭제" if kind == "delete" else "수정"
+    notify_admin(
+        f"[자료실] {label} 요청 · {info.get('name')}",
+        f"제조사: {info.get('name')}\n종류: {label} 요청\n대상 문서#: {tid}\n"
+        f"바꿀 유형: {dict(TYPES).get(doc_type, doc_type or '-')}\n바꿀 제목: {title or '-'}\n사유: {note or '-'}\n\n"
+        f"검토(승인/반려): {admin_link()}",
+    )
     return _back(name, t, f"📩 {label} 요청이 접수됐어요. 관리자 검토 후 반영됩니다. 감사합니다!")
 
 
 # ---------- 관리자 검토 ----------
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin(request: Request):
-    key = request.query_params.get("key") or ""
-    msg = request.query_params.get("msg") or ""
-    if not ADMIN_SECRET or key != ADMIN_SECRET:
-        return HTMLResponse(page_html("관리자", '<section><p>접근 권한이 없어요.</p></section>'), status_code=403)
-    try:
-        pend = _rpc("mat_pending", {})
-    except Exception as e:  # noqa: BLE001
-        return HTMLResponse(page_html("관리자", f'<section><p>오류: {esc(e)}</p></section>'), status_code=502)
-    pend = pend if isinstance(pend, list) else []
-    banner = f'<div class="banner">{esc(msg)}</div>' if msg else ""
-    cards = ""
-    for c in pend:
-        kind = c.get("kind")
-        kcls = " " + kind if kind in ("edit", "delete") else ""
-        klab = {"upload": "업로드", "edit": "수정", "delete": "삭제"}.get(kind, kind)
-        surl = https_only(c.get("storage_url"))
-        preview = f' · <a href="{esc(surl)}" target="_blank" rel="noopener">파일보기</a>' if surl else ""
-        tid = f' · 대상문서#{esc(c.get("target_doc_id"))}' if c.get("target_doc_id") else ""
-        note = f'<div style="font-size:13px;color:#555;margin-top:4px">메모: {esc(c.get("note"))}</div>' if c.get("note") else ""
-        cards += (
-            f'<div class="adm"><div><span class="k{kcls}">{esc(klab)}</span>'
-            f'<b>{esc(c.get("mname") or ("#" + str(c.get("mid"))))}</b> · {esc(dict(TYPES).get(c.get("doc_type"), c.get("doc_type")))}'
-            f' · {esc(c.get("title") or "")}{tid}{preview}</div>'
-            f'<div style="font-size:12px;color:#999;margin-top:2px">요청자 {esc((c.get("submitter") or "")[:10])}… · {esc(str(c.get("created_at"))[:19])}</div>'
-            f"{note}"
+def _adm_card(c: dict, key: str) -> str:
+    kind = c.get("kind")
+    kcls = " " + kind if kind in ("edit", "delete") else ""
+    klab = {"upload": "업로드", "edit": "수정", "delete": "삭제"}.get(kind, kind)
+    status = c.get("status")
+    surl = https_only(c.get("storage_url"))
+    preview = f' · <a href="{esc(surl)}" target="_blank" rel="noopener">파일보기</a>' if surl else ""
+    tid = f' · 대상문서#{esc(c.get("target_doc_id"))}' if c.get("target_doc_id") else ""
+    note = f'<div style="font-size:13px;color:#555;margin-top:4px">사유/메모: {esc(c.get("note"))}</div>' if c.get("note") else ""
+    stbadge = ""
+    if status == "approved":
+        stbadge = '<span class="st approved">승인됨</span>'
+    elif status == "rejected":
+        stbadge = '<span class="st rejected">반려됨</span>'
+    head = (
+        f'<div><span class="k{kcls}">{esc(klab)}</span>'
+        f'<b>{esc(c.get("mname") or ("#" + str(c.get("mid"))))}</b> · '
+        f'{esc(dict(TYPES).get(c.get("doc_type"), c.get("doc_type")))}'
+        f' · {esc(c.get("title") or "")}{tid}{preview}{stbadge}</div>'
+        f'<div style="font-size:12px;color:#999;margin-top:2px">요청자 {esc((c.get("submitter") or "")[:10])}… · {esc(str(c.get("created_at"))[:19])}</div>'
+        f"{note}"
+    )
+    if status == "pending":
+        action = (
             f'<form class="admrow" action="/admin/review" method="post">'
             f'<input type="hidden" name="key" value="{esc(key)}">'
             f'<input type="hidden" name="id" value="{esc(c.get("id"))}">'
             '<input type="text" name="note" placeholder="검토 메모(선택)" style="flex:1;font-size:13px;padding:7px;border:1px solid #ddd;border-radius:8px">'
             '<button class="btn" type="submit" name="action" value="approve">승인</button>'
             '<button class="btn link" type="submit" name="action" value="reject">반려</button>'
-            "</form></div>"
+            "</form>"
         )
+    else:
+        rn = f'검토 {esc(str(c.get("reviewed_at"))[:19])}'
+        if c.get("reviewer_note"):
+            rn += f' · 메모: {esc(c.get("reviewer_note"))}'
+        action = f'<div class="rn">{rn}</div>'
+    return f'<div class="adm">{head}{action}</div>'
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin(request: Request):
+    key = request.query_params.get("key") or ""
+    msg = request.query_params.get("msg") or ""
+    status = request.query_params.get("status") or "pending"
+    q = (request.query_params.get("q") or "").strip()
+    if status not in ("pending", "approved", "rejected", "all"):
+        status = "pending"
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        return HTMLResponse(page_html("관리자", '<section><p>접근 권한이 없어요.</p></section>'), status_code=403)
+    try:
+        counts = _rpc("mat_contrib_counts", {})
+        rows = _rpc("mat_contrib_list", {"p_status": status})
+    except Exception as e:  # noqa: BLE001
+        return HTMLResponse(page_html("관리자", f'<section><p>오류: {esc(e)}</p></section>'), status_code=502)
+    counts = counts if isinstance(counts, dict) else {}
+    rows = rows if isinstance(rows, list) else []
+    if q:
+        ql = q.lower()
+        rows = [c for c in rows if ql in str(c.get("mname") or "").lower()]
+
+    def kq(extra: dict) -> str:
+        p = {"key": key}
+        p.update(extra)
+        return "/admin?" + urllib.parse.urlencode(p)
+
+    tabs_def = [("pending", "대기", counts.get("pending", 0)),
+                ("approved", "승인", counts.get("approved", 0)),
+                ("rejected", "반려", counts.get("rejected", 0)),
+                ("all", "전체", counts.get("total", 0))]
+    tabs = "".join(
+        f'<a class="tab{" on" if status == s else ""}" href="{esc(kq({"status": s, "q": q}))}">{esc(lab)} {n}</a>'
+        for s, lab, n in tabs_def
+    )
+    filt = (
+        f'<form class="filter" action="/admin" method="get">'
+        f'<input type="hidden" name="key" value="{esc(key)}">'
+        f'<input type="hidden" name="status" value="{esc(status)}">'
+        f'<input type="text" name="q" value="{esc(q)}" placeholder="제조사 이름으로 검색">'
+        '<button class="btn" type="submit">검색</button>'
+        + (f'<a class="btn ghost" href="{esc(kq({"status": status}))}">초기화</a>' if q else "")
+        + "</form>"
+    )
+    cards = "".join(_adm_card(c, key) for c in rows)
     if not cards:
-        cards = '<section><p>대기 중인 기여가 없어요. 👍</p></section>'
+        empty = "대기 중인 기여가 없어요. 👍" if status == "pending" else "해당 항목이 없어요."
+        cards = f'<section><p>{esc(empty)}</p></section>'
+    banner = f'<div class="banner">{esc(msg)}</div>' if msg else ""
     inner = (
-        '<header><div class="badge">관리자 검토</div><h1>대기 중 기여</h1></header>'
-        f"{banner}{cards}"
+        '<header><div class="badge">관리자 검토</div><h1>기여 관리</h1></header>'
+        f"{banner}{tabs}{filt}{cards}"
     )
     return HTMLResponse(page_html("관리자 검토", inner))
 
