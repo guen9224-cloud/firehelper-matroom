@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SB_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
 BUCKET = "material-docs"
 MAX_UPLOAD = 25 * 1024 * 1024  # 25MB
 
@@ -471,6 +471,93 @@ async def do_request(name: str, t: str = Form(""), kind: str = Form("edit"),
     return _back(name, t, f"📩 {label} 요청이 접수됐어요. 관리자 검토 후 반영됩니다. 감사합니다!")
 
 
+# ---------- 신규(미등록) 제조사 자료 등록 ----------
+
+@app.get("/new", response_class=HTMLResponse)
+async def new_page(request: Request):
+    name = (request.query_params.get("name") or "").strip()
+    tok = request.query_params.get("t") or ""
+    msg = request.query_params.get("msg") or ""
+    can = bool(check_token(tok).get("ok")) if tok else False
+    banner = ""
+    if msg:
+        cls = "banner"
+        if msg.startswith("!"):
+            cls = "banner err"; msg = msg[1:]
+        banner = f'<div class="{cls}">{esc(msg)}</div>'
+    if not can:
+        banner += '<div class="banner warn">ℹ️ 자료 등록은 카카오톡 챗봇에서 <b>“📤 자료 등록하기”</b> 버튼으로 들어오셔야 가능해요(연동 사용자 전용).</div>'
+        inner = (
+            '<header><div class="badge">소방 자재승인 자료실</div><h1>새 제조사 자료 등록</h1></header>'
+            f"{banner}"
+        )
+        return HTMLResponse(page_html("자료 등록", inner))
+    opts = "".join(f'<option value="{esc(t)}">{esc(dict(TYPES)[t])}</option>' for t in UPLOAD_TYPES)
+    form = (
+        f'<section><form class="form" action="/new/upload" method="post" enctype="multipart/form-data">'
+        f'<input type="hidden" name="t" value="{esc(tok)}">'
+        '<div class="irow"><b>제조사명</b></div>'
+        f'<input type="text" name="name" value="{esc(name)}" placeholder="제조사 이름 (예: 원일산업)" required>'
+        f'<select name="doc_type">{opts}</select>'
+        '<input type="text" name="title" placeholder="자료 제목(선택) 예) 2024 카탈로그">'
+        '<input type="file" name="file" required>'
+        '<button class="btn" type="submit">등록 요청 (검토 후 반영)</button>'
+        '</form></section>'
+    )
+    inner = (
+        '<header><div class="badge">소방 자재승인 자료실</div><h1>새 제조사 자료 등록</h1></header>'
+        f"{banner}"
+        '<div class="banner">✅ 연동 확인됨 — 아직 자료실에 없는 제조사의 자료를 올리실 수 있어요. 승인되면 자료실에 새로 등록돼요.</div>'
+        f"{form}"
+    )
+    return HTMLResponse(page_html("자료 등록", inner))
+
+
+@app.post("/new/upload")
+async def new_upload(name: str = Form(""), t: str = Form(""), doc_type: str = Form("기타"),
+                     title: str = Form(""), file: UploadFile = File(...)):
+    name = (name or "").strip()
+    chk = check_token(t)
+    if not chk.get("ok"):
+        return _new_back(name, t, "!토큰이 유효하지 않아요. 카톡에서 다시 들어와 주세요.")
+    if not name:
+        return _new_back(name, t, "!제조사 이름을 입력해 주세요.")
+    data = await file.read()
+    if not data:
+        return _new_back(name, t, "!빈 파일이에요.")
+    if len(data) > MAX_UPLOAD:
+        return _new_back(name, t, "!파일이 너무 커요(최대 25MB).")
+    if doc_type not in UPLOAD_TYPES:
+        doc_type = "기타"
+    safe = os.path.basename(file.filename or "file").replace(" ", "_")
+    path = f"contrib/new/{uuid.uuid4().hex}_{safe}"
+    try:
+        purl = storage_upload(path, data, file.content_type or "application/octet-stream")
+    except Exception as e:  # noqa: BLE001
+        return _new_back(name, t, f"!업로드 실패: {e}")
+    try:
+        r = _rpc("mat_submit_new", {
+            "p_token": t, "p_proposed_name": name, "p_doc_type": doc_type,
+            "p_title": title or safe, "p_storage_url": purl, "p_note": None,
+        })
+    except Exception as e:  # noqa: BLE001
+        return _new_back(name, t, f"!요청 저장 실패: {e}")
+    if isinstance(r, dict) and not r.get("ok"):
+        return _new_back(name, t, "!" + str(r.get("error") or "요청 실패"))
+    notify_admin(
+        f"[자료실] 신규 제조사 등록 요청 · {name}",
+        f"신규 제조사: {name}\n유형: {dict(TYPES).get(doc_type, doc_type)}\n제목: {title or safe}\n"
+        f"파일: {purl}\n\n검토(승인 시 제조사 신규 생성): {admin_link()}",
+    )
+    return _new_back(name, t, "📩 등록 요청이 접수됐어요. 관리자 검토 후 자료실에 새로 등록됩니다. 감사합니다!")
+
+
+def _new_back(name: str, tok: str, msg: str) -> RedirectResponse:
+    url = (f"/new?name={urllib.parse.quote(name, safe='')}"
+           f"&t={urllib.parse.quote(tok, safe='')}&msg={urllib.parse.quote(msg, safe='')}")
+    return RedirectResponse(url, status_code=303)
+
+
 # ---------- 관리자 검토 ----------
 
 def _adm_card(c: dict, key: str) -> str:
@@ -515,7 +602,7 @@ def _adm_card(c: dict, key: str) -> str:
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin(request: Request):
-    key = request.query_params.get("key") or ""
+    key = (request.query_params.get("key") or "").strip()
     msg = request.query_params.get("msg") or ""
     status = request.query_params.get("status") or "pending"
     q = (request.query_params.get("q") or "").strip()
@@ -571,6 +658,7 @@ async def admin(request: Request):
 @app.post("/admin/review")
 async def admin_review(key: str = Form(""), id: str = Form(""),
                        action: str = Form("approve"), note: str = Form("")):
+    key = (key or "").strip()
     if not ADMIN_SECRET or key != ADMIN_SECRET:
         return HTMLResponse("forbidden", status_code=403)
     if action not in ("approve", "reject"):
