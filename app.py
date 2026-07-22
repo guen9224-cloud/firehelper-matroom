@@ -31,7 +31,8 @@ SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SB_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
 BUCKET = "material-docs"
-MAX_UPLOAD = 25 * 1024 * 1024  # 25MB
+MAX_UPLOAD = 50 * 1024 * 1024  # 50MB (이미지는 업로드 전 자동 압축)
+IMG_MAXDIM = 2200              # 이미지 자동 압축 시 최대 변 길이(px)
 
 # 이메일 알림(SMTP). 미설정 시 조용히 건너뜀. Gmail 예: SMTP_HOST=smtp.gmail.com, SMTP_PORT=587,
 # SMTP_USER=본인지메일, SMTP_PASS=Google 앱 비밀번호, ADMIN_EMAIL=받을주소(미설정 시 SMTP_USER)
@@ -111,6 +112,7 @@ section h2{font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:
 .form input[type=text],.form select,.form textarea{width:100%;font-size:13px;padding:8px;border:1px solid #ddd;border-radius:8px;font-family:inherit}
 .form textarea{min-height:50px;resize:vertical}
 .form input[type=file]{font-size:12px}
+.hint{font-size:11px;color:#999}
 .banner{background:#eaf6ec;border:1px solid #bfe3c6;color:#2e6b3a;border-radius:12px;padding:12px 14px;font-size:13px;margin-bottom:14px}
 .banner.warn{background:#fff7e6;border-color:#f0d9a8;color:#8a6d1f}
 .banner.err{background:#fdecea;border-color:#f2b8b1;color:#a23b30}
@@ -191,6 +193,35 @@ def storage_upload(path: str, data: bytes, content_type: str) -> str:
     return SB_URL + "/storage/v1/object/public/" + BUCKET + "/" + urllib.parse.quote(path)
 
 
+def maybe_compress(data: bytes, content_type: str, filename: str):
+    """이미지면 자동으로 축소·재압축해서 (data, content_type, filename) 반환. 실패 시 원본 그대로."""
+    fn = (filename or "").lower()
+    is_image = (content_type or "").lower().startswith("image/") or fn.endswith(
+        (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif")
+    )
+    if not is_image:
+        return data, content_type, filename
+    try:
+        import io
+        from PIL import Image, ImageOps
+        im = Image.open(io.BytesIO(data))
+        im = ImageOps.exif_transpose(im)
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        w, h = im.size
+        if max(w, h) > IMG_MAXDIM:
+            im.thumbnail((IMG_MAXDIM, IMG_MAXDIM))
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=82, optimize=True)
+        nd = out.getvalue()
+        if 0 < len(nd) < len(data):
+            base = os.path.splitext(os.path.basename(filename or "image"))[0] or "image"
+            return nd, "image/jpeg", base + ".jpg"
+    except Exception:
+        pass
+    return data, content_type, filename
+
+
 def page_html(title: str, inner: str, focus: str = "") -> str:
     js = ""
     if True:
@@ -224,7 +255,9 @@ def upload_form(name: str, token: str, doc_type: str) -> str:
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<select name="doc_type">{opts}</select>'
         '<input type="text" name="title" placeholder="자료 제목(선택) 예) 2024 카탈로그">'
-        '<input type="file" name="file" required>'
+        '<input type="file" name="file">'
+        '<input type="text" name="link_url" placeholder="또는 파일 링크(URL) — 대용량 PDF는 구글드라이브 등 링크">'
+        '<div class="hint">파일 또는 링크 중 하나. 사진은 자동으로 용량을 줄여 올려요. 파일 최대 50MB.</div>'
         '<button class="btn" type="submit">업로드 요청(검토 후 반영)</button>'
         "</form></details>"
     )
@@ -388,9 +421,36 @@ def _back(name: str, tok: str, msg: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
+async def _store_upload(file, link_url: str, path_prefix: str):
+    """파일(있으면 압축) 또는 링크를 저장. 반환: (storage_url, display_name, error_or_None)."""
+    link_url = (link_url or "").strip()
+    data = b""
+    if file is not None and getattr(file, "filename", ""):
+        data = await file.read()
+    if data:
+        safe = os.path.basename(file.filename or "file").replace(" ", "_")
+        data, ctype, safe = maybe_compress(data, file.content_type or "", safe)
+        if len(data) > MAX_UPLOAD:
+            return None, None, ("!파일이 너무 커요(최대 50MB). 큰 PDF는 아래 '파일 링크(URL)' 칸에 "
+                                "구글드라이브·드롭박스 공유 링크를 붙여 등록해 주세요.")
+        path = f"{path_prefix}/{uuid.uuid4().hex}_{safe}"
+        try:
+            purl = storage_upload(path, data, ctype or "application/octet-stream")
+        except Exception as e:  # noqa: BLE001
+            return None, None, f"!업로드 실패: {e}"
+        return purl, safe, None
+    if link_url:
+        if not link_url.lower().startswith(("http://", "https://")):
+            return None, None, "!링크는 http(s):// 로 시작하는 주소여야 해요."
+        nm = os.path.basename(urllib.parse.urlparse(link_url).path) or "링크 자료"
+        return link_url, nm, None
+    return None, None, "!파일을 첨부하거나 파일 링크(URL)를 입력해 주세요."
+
+
 @app.post("/m/{name}/upload")
 async def do_upload(name: str, t: str = Form(""), doc_type: str = Form("기타"),
-                    title: str = Form(""), file: UploadFile = File(...)):
+                    title: str = Form(""), link_url: str = Form(""),
+                    file: UploadFile = File(None)):
     chk = check_token(t)
     if not chk.get("ok"):
         return _back(name, t, "!토큰이 유효하지 않아요. 카톡 자료실 열기로 다시 들어와 주세요.")
@@ -401,20 +461,11 @@ async def do_upload(name: str, t: str = Form(""), doc_type: str = Form("기타")
     if not info or info.get("matched") is not True:
         return _back(name, t, "!제조사를 찾지 못했어요.")
     mid = _mid_of(info)
-    data = await file.read()
-    if not data:
-        return _back(name, t, "!빈 파일이에요.")
-    if len(data) > MAX_UPLOAD:
-        return _back(name, t, "!파일이 너무 커요(최대 25MB).")
     if doc_type not in UPLOAD_TYPES:
         doc_type = "기타"
-    safe = os.path.basename(file.filename or "file")
-    safe = safe.replace(" ", "_")
-    path = f"contrib/{mid}/{uuid.uuid4().hex}_{safe}"
-    try:
-        purl = storage_upload(path, data, file.content_type or "application/octet-stream")
-    except Exception as e:  # noqa: BLE001
-        return _back(name, t, f"!업로드 실패: {e}")
+    purl, safe, err = await _store_upload(file, link_url, f"contrib/{mid}")
+    if err:
+        return _back(name, t, err)
     try:
         r = _rpc("mat_submit_contrib", {
             "p_token": t, "p_manufacturer_id": mid, "p_kind": "upload",
@@ -500,7 +551,9 @@ async def new_page(request: Request):
         f'<input type="text" name="name" value="{esc(name)}" placeholder="제조사 이름 (예: 원일산업)" required>'
         f'<select name="doc_type">{opts}</select>'
         '<input type="text" name="title" placeholder="자료 제목(선택) 예) 2024 카탈로그">'
-        '<input type="file" name="file" required>'
+        '<input type="file" name="file">'
+        '<input type="text" name="link_url" placeholder="또는 파일 링크(URL) — 대용량 PDF는 구글드라이브 등 링크">'
+        '<div class="hint">파일 또는 링크 중 하나. 사진은 자동으로 용량을 줄여 올려요. 파일 최대 50MB.</div>'
         '<button class="btn" type="submit">등록 요청 (검토 후 반영)</button>'
         '</form></section>'
     )
@@ -515,26 +568,19 @@ async def new_page(request: Request):
 
 @app.post("/new/upload")
 async def new_upload(name: str = Form(""), t: str = Form(""), doc_type: str = Form("기타"),
-                     title: str = Form(""), file: UploadFile = File(...)):
+                     title: str = Form(""), link_url: str = Form(""),
+                     file: UploadFile = File(None)):
     name = (name or "").strip()
     chk = check_token(t)
     if not chk.get("ok"):
         return _new_back(name, t, "!토큰이 유효하지 않아요. 카톡에서 다시 들어와 주세요.")
     if not name:
         return _new_back(name, t, "!제조사 이름을 입력해 주세요.")
-    data = await file.read()
-    if not data:
-        return _new_back(name, t, "!빈 파일이에요.")
-    if len(data) > MAX_UPLOAD:
-        return _new_back(name, t, "!파일이 너무 커요(최대 25MB).")
     if doc_type not in UPLOAD_TYPES:
         doc_type = "기타"
-    safe = os.path.basename(file.filename or "file").replace(" ", "_")
-    path = f"contrib/new/{uuid.uuid4().hex}_{safe}"
-    try:
-        purl = storage_upload(path, data, file.content_type or "application/octet-stream")
-    except Exception as e:  # noqa: BLE001
-        return _new_back(name, t, f"!업로드 실패: {e}")
+    purl, safe, err = await _store_upload(file, link_url, "contrib/new")
+    if err:
+        return _new_back(name, t, err)
     try:
         r = _rpc("mat_submit_new", {
             "p_token": t, "p_proposed_name": name, "p_doc_type": doc_type,
