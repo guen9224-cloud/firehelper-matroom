@@ -702,6 +702,11 @@ async def admin(request: Request):
         return HTMLResponse(page_html("관리자", f'<section><p>오류: {esc(e)}</p></section>'), status_code=502)
     counts = counts if isinstance(counts, dict) else {}
     rows = rows if isinstance(rows, list) else []
+    try:
+        bizno_pending = _rpc("mat_bizno_pending", {})
+        bizno_pending = bizno_pending if isinstance(bizno_pending, list) else []
+    except Exception:
+        bizno_pending = []
     if q:
         ql = q.lower()
         rows = [c for c in rows if ql in str(c.get("mname") or "").lower()]
@@ -733,11 +738,49 @@ async def admin(request: Request):
         empty = "대기 중인 기여가 없어요. 👍" if status == "pending" else "해당 항목이 없어요."
         cards = f'<section><p>{esc(empty)}</p></section>'
     banner = f'<div class="banner">{esc(msg)}</div>' if msg else ""
+    bizsec = ""
+    if bizno_pending:
+        items = ""
+        for b in bizno_pending:
+            items += (
+                '<div class="adm"><div><span class="k" style="background:#e67e22">확인필요</span>'
+                f'<b>{esc(b.get("name"))}</b> · 자동수집 사업자번호 <b>{esc(b.get("biz_no"))}</b></div>'
+                f'<form class="admrow" action="/admin/bizno" method="post">'
+                f'<input type="hidden" name="key" value="{esc(key)}">'
+                f'<input type="hidden" name="id" value="{esc(b.get("id"))}">'
+                '<button class="btn" type="submit" name="action" value="confirm">맞음(확정)</button>'
+                '<button class="btn link" type="submit" name="action" value="clear">틀림(삭제)</button>'
+                "</form></div>"
+            )
+        bizsec = (
+            '<section><h2>🔎 사업자번호 확인 대기 '
+            f'<span class="cnt has">{len(bizno_pending)}</span></h2>'
+            '<div class="hint" style="margin-bottom:8px">AI가 웹에서 자동 수집한 사업자번호예요. 맞는지 확인해 주세요(틀리면 삭제).</div>'
+            f"{items}</section>"
+        )
     inner = (
         '<header><div class="badge">관리자 검토</div><h1>기여 관리</h1></header>'
-        f"{banner}{tabs}{filt}{cards}"
+        f"{banner}{bizsec}{tabs}{filt}{cards}"
     )
     return HTMLResponse(page_html("관리자 검토", inner))
+
+
+@app.post("/admin/bizno")
+async def admin_bizno(key: str = Form(""), id: str = Form(""), action: str = Form("confirm")):
+    key = (key or "").strip()
+    if not ADMIN_SECRET or key != ADMIN_SECRET:
+        return HTMLResponse("forbidden", status_code=403)
+    if action not in ("confirm", "clear"):
+        action = "confirm"
+    try:
+        r = _rpc("mat_bizno_review", {"p_id": int(id), "p_action": action})
+        m = "✅ 사업자번호 확정했어요." if action == "confirm" else "🗑️ 사업자번호를 지웠어요."
+        if not (isinstance(r, dict) and r.get("ok")):
+            m = "처리 중 문제가 있었어요."
+    except Exception as e:  # noqa: BLE001
+        m = f"오류: {e}"
+    url = f"/admin?key={urllib.parse.quote(key, safe='')}&msg={urllib.parse.quote(m, safe='')}"
+    return RedirectResponse(url, status_code=303)
 
 
 @app.post("/admin/review")
