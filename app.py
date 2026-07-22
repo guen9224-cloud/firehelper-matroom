@@ -14,6 +14,7 @@
 render 시작 명령:  uvicorn app:app --host 0.0.0.0 --port $PORT
 """
 import os
+import re
 import json
 import uuid
 import ssl
@@ -447,6 +448,17 @@ def _back(name: str, tok: str, msg: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
+def _keysafe(filename: str) -> str:
+    """저장소 object key 로 쓸 수 있게 ASCII 안전 문자만 남김(한글·공백 등 제거)."""
+    base = os.path.basename(filename or "file")
+    name, ext = os.path.splitext(base)
+    name = re.sub(r"[^A-Za-z0-9._-]+", "", name).strip("._-")
+    ext = re.sub(r"[^A-Za-z0-9.]+", "", ext)
+    if not name:
+        name = "file"
+    return (name[:60] + ext) if ext else name[:60]
+
+
 async def _store_upload(file, link_url: str, path_prefix: str):
     """파일(있으면 압축) 또는 링크를 저장. 반환: (storage_url, display_name, error_or_None)."""
     link_url = (link_url or "").strip()
@@ -454,17 +466,18 @@ async def _store_upload(file, link_url: str, path_prefix: str):
     if file is not None and getattr(file, "filename", ""):
         data = await file.read()
     if data:
-        safe = os.path.basename(file.filename or "file").replace(" ", "_")
-        data, ctype, safe = maybe_compress(data, file.content_type or "", safe)
+        disp = os.path.basename(file.filename or "file")  # 화면 표시용(한글 OK)
+        data, ctype, disp = maybe_compress(data, file.content_type or "", disp)
         if len(data) > MAX_UPLOAD:
             return None, None, ("!파일이 너무 커요(최대 50MB). 큰 PDF는 아래 '파일 링크(URL)' 칸에 "
                                 "구글드라이브·드롭박스 공유 링크를 붙여 등록해 주세요.")
-        path = f"{path_prefix}/{uuid.uuid4().hex}_{safe}"
+        # 저장소 key 는 ASCII 안전 문자만 허용 → 한글 등은 제거
+        path = f"{path_prefix}/{uuid.uuid4().hex}_{_keysafe(disp)}"
         try:
             purl = storage_upload(path, data, ctype or "application/octet-stream")
         except Exception as e:  # noqa: BLE001
             return None, None, f"!업로드 실패: {e}"
-        return purl, safe, None
+        return purl, disp, None
     if link_url:
         if not link_url.lower().startswith(("http://", "https://")):
             return None, None, "!링크는 http(s):// 로 시작하는 주소여야 해요."
