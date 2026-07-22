@@ -181,21 +181,38 @@ def check_token(tok: str) -> dict:
 
 
 def storage_upload(path: str, data: bytes, content_type: str) -> str:
-    """material-docs 버킷에 업로드하고 공개 URL 반환."""
-    req = urllib.request.Request(
-        SB_URL + "/storage/v1/object/" + BUCKET + "/" + urllib.parse.quote(path),
-        data=data,
-        headers={
-            "apikey": SB_KEY,
-            "Authorization": "Bearer " + SB_KEY,
-            "Content-Type": content_type or "application/octet-stream",
-            "x-upsert": "true",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=60) as r:
-        r.read()
-    return SB_URL + "/storage/v1/object/public/" + BUCKET + "/" + urllib.parse.quote(path)
+    """material-docs 버킷에 업로드하고 공개 URL 반환. requests 우선, 실패 시 urllib."""
+    up_url = SB_URL + "/storage/v1/object/" + BUCKET + "/" + urllib.parse.quote(path)
+    pub_url = SB_URL + "/storage/v1/object/public/" + BUCKET + "/" + urllib.parse.quote(path)
+    headers = {
+        "apikey": SB_KEY,
+        "Authorization": "Bearer " + SB_KEY,
+        "Content-Type": content_type or "application/octet-stream",
+        "x-upsert": "true",
+        "User-Agent": "matroom/1.0",
+    }
+    # 1) requests (대용량 전송에 안정적)
+    try:
+        import requests  # type: ignore
+        resp = requests.post(up_url, data=data, headers=headers, timeout=300)
+        if resp.status_code >= 300:
+            raise RuntimeError(f"storage {resp.status_code}: {resp.text[:300]}")
+        return pub_url
+    except ImportError:
+        pass
+    # 2) urllib 폴백
+    req = urllib.request.Request(up_url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            r.read()
+    except urllib.error.HTTPError as e:  # 실제 에러 본문을 노출
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        raise RuntimeError(f"storage {e.code}: {body}") from None
+    return pub_url
 
 
 def maybe_compress(data: bytes, content_type: str, filename: str):
