@@ -109,6 +109,13 @@ section h2{font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:
 .contrib{margin-top:10px;border-top:1px dashed #eee;padding-top:10px}
 .contrib summary{font-size:12px;color:#c0392b;cursor:pointer;list-style:none}
 .contrib summary::-webkit-details-marker{display:none}
+.editrow{display:none}
+body.editmode .editrow{display:block}
+.editbar{margin:2px 0 14px}
+.editbtn{background:#fff;color:#c0392b;border:1px solid #e0b4ae;font-size:13px;padding:9px 15px;border-radius:10px;cursor:pointer;font-weight:600}
+body.editmode .editbtn{background:#c0392b;color:#fff;border-color:#c0392b}
+.edithint{font-size:12px;color:#8a6d1f;background:#fff7e6;border:1px solid #f0d9a8;border-radius:8px;padding:8px 10px;margin-top:8px;display:none}
+body.editmode .edithint{display:block}
 .form{margin-top:10px;display:flex;flex-direction:column;gap:8px}
 .form input[type=text],.form select,.form textarea{width:100%;font-size:13px;padding:8px;border:1px solid #ddd;border-radius:8px;font-family:inherit}
 .form textarea{min-height:50px;resize:vertical}
@@ -282,7 +289,7 @@ def upload_form(name: str, token: str, doc_type: str) -> str:
         for t in UPLOAD_TYPES
     )
     return (
-        '<details class="contrib"><summary>＋ 이 유형 자료 올리기</summary>'
+        '<details class="contrib editrow"><summary>＋ 이 유형 자료 올리기</summary>'
         f'<form class="form" action="{act}" method="post" enctype="multipart/form-data">'
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<select name="doc_type">{opts}</select>'
@@ -303,7 +310,7 @@ def request_form(name: str, token: str, doc: dict) -> str:
         for t in UPLOAD_TYPES
     )
     return (
-        '<details class="contrib"><summary>수정·삭제 요청</summary>'
+        '<details class="contrib editrow"><summary>수정·삭제 요청</summary>'
         f'<form class="form" action="{act}" method="post">'
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<input type="hidden" name="target_doc_id" value="{did}">'
@@ -389,9 +396,20 @@ def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str
         info_rows = '<div class="irow">등록된 정보가 없어요.</div>'
 
     total = len(docs)
+    edit_bar = ""
+    if can:
+        edit_bar = (
+            '<div class="editbar">'
+            '<button type="button" class="editbtn" onclick="var b=document.body.classList.toggle(\'editmode\');'
+            'this.textContent=b?\'\\u2705 \\ud3b8\\uc9d1 \\uc885\\ub8cc\':\'\\u270f\\ufe0f \\uc790\\ub8cc \\uc218\\uc815\\u00b7\\uc0ad\\uc81c\\u00b7\\ucd94\\uac00 \\uc694\\uccad\';">'
+            '✏️ 자료 수정·삭제·추가 요청</button>'
+            '<div class="edithint">각 자료의 “수정·삭제 요청”과 유형별 “＋ 올리기”가 아래에 나타났어요. 요청은 관리자 검토 후 반영됩니다.</div>'
+            '</div>'
+        )
     inner = (
         f'<header><div class="badge">소방 자재승인 자료실</div><h1>{esc(info.get("name"))}</h1></header>'
         f"{banner}"
+        f"{edit_bar}"
         f'<div class="info">{info_rows}</div>'
         f"{sections}"
         f"<footer>보유 자료 {total}건 · 공개 정보를 정리한 것입니다.<br>오류·누락은 카톡 챗봇 또는 위 요청으로 알려주세요.</footer>"
