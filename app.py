@@ -149,6 +149,12 @@ def https_only(u) -> str:
     return s if s.lower().startswith("https://") else ""
 
 
+def link_ok(u) -> str:
+    """원본 페이지 링크는 http/https 모두 허용(새 탭 이동은 혼합콘텐츠 문제 없음)."""
+    s = str(u or "").strip()
+    return s if s.lower().startswith(("http://", "https://")) else ""
+
+
 def _rpc(fn: str, payload: dict):
     if not SB_URL or not SB_KEY:
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 환경변수가 필요합니다.")
@@ -335,7 +341,7 @@ def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str
             rows = ""
             for d in lst:
                 file = https_only(d.get("file"))
-                link = https_only(d.get("link"))
+                link = link_ok(d.get("link"))
                 href = file or link
                 title = esc(d.get("title") or label)
                 act = ""
