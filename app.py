@@ -269,7 +269,7 @@ def soban_section(ic: dict) -> str:
         lab = AMT_LABEL.get(b.get("type"), (b.get("type") or "") + " 평가액")
         amts += (f'<div class="amt"><b>{esc(lab)} ({esc(yr)})</b>'
                  f'<span>{esc(_fmt_amt(b.get("eval_amount")))}</span></div>')
-    return ('<section class="soban"><h2>🧯 소방시설관리업 · 점검능력공시</h2>'
+    return ('<section class="soban"><h2>🧯 소방시설업 능력공시</h2>'
             f'{amts}</section>')
 
 
