@@ -201,25 +201,62 @@ def _fmt_amt(v) -> str:
         return "-"
 
 
+def _fmt_phone(v) -> str:
+    """전화번호 보기 좋게(하이픈). 매칭 안 되면 원본 그대로."""
+    if not v:
+        return v
+    d = re.sub(r"[^0-9]", "", str(v))
+    if len(d) == 11:
+        return f"{d[:3]}-{d[3:7]}-{d[7:]}"
+    if len(d) == 10:
+        if d.startswith("02"):
+            return f"{d[:2]}-{d[2:6]}-{d[6:]}"
+        return f"{d[:3]}-{d[3:6]}-{d[6:]}"
+    if len(d) == 9 and d.startswith("02"):
+        return f"{d[:2]}-{d[2:5]}-{d[5:]}"
+    return str(v)
+
+
 def soban_tags(ic: dict) -> list:
     return [b.get("type") for b in (ic.get("biz") or []) if b.get("type")]
 
 
+def _merged_info_rows(info: dict, ic: dict) -> str:
+    """제조사·소방업체 정보의 중복 항목(대표·주소·연락처 등)을 한 벌로 합쳐 정보 행 렌더."""
+    info = info or {}
+    ic = ic or {}
+
+    def pref(*vals):
+        for v in vals:
+            if v not in (None, ""):
+                return v
+        return None
+
+    rows = [
+        ("대표", pref(info.get("rep"), ic.get("rep"))),
+        ("주소", pref(info.get("address"), ic.get("address"))),
+        ("전화", _fmt_phone(pref(ic.get("tel"), info.get("phone")))),
+        ("팩스", _fmt_phone(pref(info.get("fax"), ic.get("fax")))),
+        ("이메일", pref(info.get("email"), ic.get("email"))),
+        ("사업자번호", pref(info.get("biz_no"), ic.get("biz_no"))),
+        ("홈페이지", pref(info.get("homepage"), ic.get("homepage"))),
+    ]
+    out = ""
+    for k, v in rows:
+        if not v:
+            continue
+        if k == "홈페이지":
+            out += f'<div class="irow"><b>{k}</b> <a href="{esc(v)}" target="_blank" rel="noopener">{esc(v)}</a></div>'
+        else:
+            out += f'<div class="irow"><b>{k}</b> {esc(v)}</div>'
+    return out or '<div class="irow">등록된 정보가 없어요.</div>'
+
+
 def soban_section(ic: dict) -> str:
-    """소방시설관리업 정보 섹션(업종·대표·연락처·팩스·주소·점검능력/시공능력 평가액)."""
+    """소방시설관리업 점검능력/시공능력 평가액 섹션(연락 정보는 위 정보 카드에 통합)."""
     biz = ic.get("biz") or []
-    types = ", ".join(soban_tags(ic))
-    rows = ""
-    if types:
-        rows += f'<div class="irow"><b>업종</b> {esc(types)}</div>'
-    if ic.get("rep"):
-        rows += f'<div class="irow"><b>대표</b> {esc(ic.get("rep"))}</div>'
-    if ic.get("tel"):
-        rows += f'<div class="irow"><b>연락처</b> {esc(ic.get("tel"))}</div>'
-    if ic.get("fax"):
-        rows += f'<div class="irow"><b>팩스</b> {esc(ic.get("fax"))}</div>'
-    if ic.get("address"):
-        rows += f'<div class="irow"><b>주소</b> {esc(ic.get("address"))}</div>'
+    if not biz:
+        return ""
     yr = ic.get("year") or 2025
     amts = ""
     for b in biz:
@@ -227,7 +264,7 @@ def soban_section(ic: dict) -> str:
         amts += (f'<div class="amt"><b>{esc(lab)} ({esc(yr)})</b>'
                  f'<span>{esc(_fmt_amt(b.get("eval_amount")))}</span></div>')
     return ('<section class="soban"><h2>🧯 소방시설관리업 · 점검능력공시</h2>'
-            f'{rows}{amts}</section>')
+            f'{amts}</section>')
 
 
 def render_soban_only(ic: dict) -> str:
@@ -238,10 +275,8 @@ def render_soban_only(ic: dict) -> str:
     inner = (
         f'<header><div class="badge">소방 자재승인 자료실</div>'
         f'<h1>{esc(ic.get("name"))}</h1>{tag_html}</header>'
+        f'<div class="info">{_merged_info_rows(None, ic)}</div>'
         f"{soban_section(ic)}"
-        '<section><h2>제조사 자료</h2>'
-        '<div class="empty">이 업체는 아직 제조사 자료(카탈로그·형식승인서류 등)가 '
-        '등록되어 있지 않아요.<br>자료를 갖고 계시면 카톡 챗봇으로 등록해 주세요 🙏</div></section>'
         '<footer>공개 정보(점검능력공시)를 정리한 것입니다.<br>'
         '오류·누락은 카톡 챗봇으로 알려주세요.</footer>'
     )
@@ -353,7 +388,7 @@ def upload_form(name: str, token: str, doc_type: str) -> str:
         for t in UPLOAD_TYPES
     )
     return (
-        '<details class="contrib"><summary>＋ 이 유형 자료 올리기</summary>'
+        '<details class="contrib"><summary>＋ 자료 올리기 (유형 선택)</summary>'
         f'<form class="form" action="{act}" method="post" enctype="multipart/form-data">'
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<select name="doc_type">{opts}</select>'
@@ -408,56 +443,38 @@ def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str
     sections = ""
     for t, label in TYPES:
         lst = by_type.get(t, [])
-        if lst:
-            rows = ""
-            for d in lst:
-                file = https_only(d.get("file"))
-                link = https_only(d.get("link"))
-                href = file or link
-                title = esc(d.get("title") or label)
-                act = ""
-                if href:
-                    cls = "btn" if file else "btn link"
-                    lab = "다운·보기" if file else "원본페이지"
-                    act = f'<a class="{cls}" href="{esc(href)}" target="_blank" rel="noopener">{lab}</a>'
-                else:
-                    act = '<span class="none">링크없음</span>'
-                rows += (
-                    f'<div class="doc"><span class="dt">{title}</span>'
-                    f'<span class="docact">{act}</span></div>'
-                )
-                if can:
-                    rows += request_form(info.get("name"), token, d)
-            inner = rows
-        else:
-            inner = '<div class="empty">등록된 자료가 없어요.</div>'
-        if can:
-            inner += upload_form(info.get("name"), token, t)
-        has = " has" if lst else ""
+        if not lst:
+            continue  # 자료 없는 유형은 숨김 — 있는 것만 표시
+        rows = ""
+        for d in lst:
+            file = https_only(d.get("file"))
+            link = https_only(d.get("link"))
+            href = file or link
+            title = esc(d.get("title") or label)
+            if href:
+                cls = "btn" if file else "btn link"
+                lab = "다운·보기" if file else "원본페이지"
+                act = f'<a class="{cls}" href="{esc(href)}" target="_blank" rel="noopener">{lab}</a>'
+            else:
+                act = '<span class="none">링크없음</span>'
+            rows += (
+                f'<div class="doc"><span class="dt">{title}</span>'
+                f'<span class="docact">{act}</span></div>'
+            )
+            if can:
+                rows += request_form(info.get("name"), token, d)
         sections += (
             f'<section data-type="{esc(t)}"><h2>{esc(label)} '
-            f'<span class="cnt{has}">{len(lst)}</span></h2>{inner}</section>'
+            f'<span class="cnt has">{len(lst)}</span></h2>{rows}</section>'
         )
+    if can:
+        # 연동 사용자: 유형을 골라 자료를 올릴 수 있는 폼(하단 1개)
+        sections += '<section>' + upload_form(info.get("name"), token, "기타") + '</section>'
+    elif not sections:
+        sections = '<section><div class="empty">아직 등록된 제조사 자료가 없어요.</div></section>'
 
-    rows_info = [
-        ("대표", info.get("rep")),
-        ("주소", info.get("address")),
-        ("전화", info.get("phone")),
-        ("팩스", info.get("fax")),
-        ("이메일", info.get("email")),
-        ("사업자번호", info.get("biz_no")),
-        ("홈페이지", info.get("homepage")),
-    ]
-    info_rows = ""
-    for k, v in rows_info:
-        if not v:
-            continue
-        if k == "홈페이지":
-            info_rows += f'<div class="irow"><b>{k}</b> <a href="{esc(v)}" target="_blank" rel="noopener">{esc(v)}</a></div>'
-        else:
-            info_rows += f'<div class="irow"><b>{k}</b> {esc(v)}</div>'
-    if not info_rows:
-        info_rows = '<div class="irow">등록된 정보가 없어요.</div>'
+    # 제조사·소방 중복 정보는 한 벌로 통합
+    info_rows = _merged_info_rows(info, ic if (ic and ic.get("matched") is True) else None)
 
     # 소방시설관리업체이기도 하면: 상단 태그 + 소방 섹션 추가
     has_soban = bool(ic and ic.get("matched") is True)
