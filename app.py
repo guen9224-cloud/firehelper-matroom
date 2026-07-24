@@ -93,6 +93,14 @@ header h1{font-size:22px;margin-top:6px}
 .irow:last-child{border:0}
 .irow b{display:inline-block;width:82px;color:#666;font-weight:600}
 .irow a{color:#c0392b;word-break:break-all}
+.tags{margin-top:8px}
+.tag{display:inline-block;background:rgba(255,255,255,.22);color:#fff;font-size:12px;font-weight:600;border-radius:999px;padding:3px 10px;margin-right:6px}
+.soban{border-left:4px solid #2980b9}
+.soban h2{color:#2168a0}
+.amt{font-size:14px;padding:6px 0;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between}
+.amt:last-child{border:0}
+.amt b{color:#666;font-weight:600}
+.amt span{font-weight:700;color:#2168a0}
 section{background:#fff;border-radius:14px;padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06);scroll-margin-top:12px}
 section h2{font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .cnt{background:#eee;color:#666;font-size:12px;border-radius:10px;padding:1px 8px;font-weight:600}
@@ -109,13 +117,6 @@ section h2{font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:
 .contrib{margin-top:10px;border-top:1px dashed #eee;padding-top:10px}
 .contrib summary{font-size:12px;color:#c0392b;cursor:pointer;list-style:none}
 .contrib summary::-webkit-details-marker{display:none}
-.editrow{display:none}
-body.editmode .editrow{display:block}
-.editbar{margin:2px 0 14px}
-.editbtn{background:#fff;color:#c0392b;border:1px solid #e0b4ae;font-size:13px;padding:9px 15px;border-radius:10px;cursor:pointer;font-weight:600}
-body.editmode .editbtn{background:#c0392b;color:#fff;border-color:#c0392b}
-.edithint{font-size:12px;color:#8a6d1f;background:#fff7e6;border:1px solid #f0d9a8;border-radius:8px;padding:8px 10px;margin-top:8px;display:none}
-body.editmode .edithint{display:block}
 .form{margin-top:10px;display:flex;flex-direction:column;gap:8px}
 .form input[type=text],.form select,.form textarea{width:100%;font-size:13px;padding:8px;border:1px solid #ddd;border-radius:8px;font-family:inherit}
 .form textarea{min-height:50px;resize:vertical}
@@ -156,12 +157,6 @@ def https_only(u) -> str:
     return s if s.lower().startswith("https://") else ""
 
 
-def link_ok(u) -> str:
-    """원본 페이지 링크는 http/https 모두 허용(새 탭 이동은 혼합콘텐츠 문제 없음)."""
-    s = str(u or "").strip()
-    return s if s.lower().startswith(("http://", "https://")) else ""
-
-
 def _rpc(fn: str, payload: dict):
     if not SB_URL or not SB_KEY:
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 환경변수가 필요합니다.")
@@ -182,6 +177,75 @@ def _rpc(fn: str, payload: dict):
 
 def mat_find(q: str):
     return _rpc("mat_find", {"q": q})
+
+
+# 소방시설관리업(점검능력공시) 조회 — 업종별 평가액 라벨
+AMT_LABEL = {"관리업": "점검능력평가액", "공사업": "시공능력평가액"}
+
+
+def insp_lookup(q: str):
+    """소방업체(inspection_company) 조회. 없으면 None. 실패해도 자료실 렌더엔 영향 없음."""
+    try:
+        r = _rpc("insp_lookup", {"q": q})
+        return r if isinstance(r, dict) else None
+    except Exception:
+        return None
+
+
+def _fmt_amt(v) -> str:
+    if v in (None, ""):
+        return "-"
+    try:
+        return f"{int(v):,} 천원"
+    except (ValueError, TypeError):
+        return "-"
+
+
+def soban_tags(ic: dict) -> list:
+    return [b.get("type") for b in (ic.get("biz") or []) if b.get("type")]
+
+
+def soban_section(ic: dict) -> str:
+    """소방시설관리업 정보 섹션(업종·대표·연락처·팩스·주소·점검능력/시공능력 평가액)."""
+    biz = ic.get("biz") or []
+    types = ", ".join(soban_tags(ic))
+    rows = ""
+    if types:
+        rows += f'<div class="irow"><b>업종</b> {esc(types)}</div>'
+    if ic.get("rep"):
+        rows += f'<div class="irow"><b>대표</b> {esc(ic.get("rep"))}</div>'
+    if ic.get("tel"):
+        rows += f'<div class="irow"><b>연락처</b> {esc(ic.get("tel"))}</div>'
+    if ic.get("fax"):
+        rows += f'<div class="irow"><b>팩스</b> {esc(ic.get("fax"))}</div>'
+    if ic.get("address"):
+        rows += f'<div class="irow"><b>주소</b> {esc(ic.get("address"))}</div>'
+    yr = ic.get("year") or 2025
+    amts = ""
+    for b in biz:
+        lab = AMT_LABEL.get(b.get("type"), (b.get("type") or "") + " 평가액")
+        amts += (f'<div class="amt"><b>{esc(lab)} ({esc(yr)})</b>'
+                 f'<span>{esc(_fmt_amt(b.get("eval_amount")))}</span></div>')
+    return ('<section class="soban"><h2>🧯 소방시설관리업 · 점검능력공시</h2>'
+            f'{rows}{amts}</section>')
+
+
+def render_soban_only(ic: dict) -> str:
+    """제조사 자료는 없고 소방업체이기만 한 경우의 자료실 페이지."""
+    tag_html = ('<div class="tags">'
+                + "".join(f'<span class="tag">{esc(t)}</span>' for t in soban_tags(ic))
+                + "</div>")
+    inner = (
+        f'<header><div class="badge">소방 자재승인 자료실</div>'
+        f'<h1>{esc(ic.get("name"))}</h1>{tag_html}</header>'
+        f"{soban_section(ic)}"
+        '<section><h2>제조사 자료</h2>'
+        '<div class="empty">이 업체는 아직 제조사 자료(카탈로그·형식승인서류 등)가 '
+        '등록되어 있지 않아요.<br>자료를 갖고 계시면 카톡 챗봇으로 등록해 주세요 🙏</div></section>'
+        '<footer>공개 정보(점검능력공시)를 정리한 것입니다.<br>'
+        '오류·누락은 카톡 챗봇으로 알려주세요.</footer>'
+    )
+    return page_html(str(ic.get("name")) + " 자료실", inner)
 
 
 def check_token(tok: str) -> dict:
@@ -289,7 +353,7 @@ def upload_form(name: str, token: str, doc_type: str) -> str:
         for t in UPLOAD_TYPES
     )
     return (
-        '<details class="contrib editrow"><summary>＋ 이 유형 자료 올리기</summary>'
+        '<details class="contrib"><summary>＋ 이 유형 자료 올리기</summary>'
         f'<form class="form" action="{act}" method="post" enctype="multipart/form-data">'
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<select name="doc_type">{opts}</select>'
@@ -310,7 +374,7 @@ def request_form(name: str, token: str, doc: dict) -> str:
         for t in UPLOAD_TYPES
     )
     return (
-        '<details class="contrib editrow"><summary>수정·삭제 요청</summary>'
+        '<details class="contrib"><summary>수정·삭제 요청</summary>'
         f'<form class="form" action="{act}" method="post">'
         f'<input type="hidden" name="t" value="{esc(token)}">'
         f'<input type="hidden" name="target_doc_id" value="{did}">'
@@ -324,7 +388,7 @@ def request_form(name: str, token: str, doc: dict) -> str:
     )
 
 
-def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str = "") -> str:
+def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str = "", ic: dict = None) -> str:
     docs = info.get("docs") or []
     by_type: dict = {}
     for d in docs:
@@ -348,7 +412,7 @@ def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str
             rows = ""
             for d in lst:
                 file = https_only(d.get("file"))
-                link = link_ok(d.get("link"))
+                link = https_only(d.get("link"))
                 href = file or link
                 title = esc(d.get("title") or label)
                 act = ""
@@ -395,22 +459,21 @@ def render_manufacturer(info: dict, token: str = "", can: bool = False, msg: str
     if not info_rows:
         info_rows = '<div class="irow">등록된 정보가 없어요.</div>'
 
+    # 소방시설관리업체이기도 하면: 상단 태그 + 소방 섹션 추가
+    has_soban = bool(ic and ic.get("matched") is True)
+    tags = ["제조사"] + (soban_tags(ic) if has_soban else [])
+    tag_html = ('<div class="tags">'
+                + "".join(f'<span class="tag">{esc(t)}</span>' for t in tags)
+                + "</div>")
+    soban_html = soban_section(ic) if has_soban else ""
+
     total = len(docs)
-    edit_bar = ""
-    if can:
-        edit_bar = (
-            '<div class="editbar">'
-            '<button type="button" class="editbtn" onclick="var b=document.body.classList.toggle(\'editmode\');'
-            'this.textContent=b?\'\\u2705 \\ud3b8\\uc9d1 \\uc885\\ub8cc\':\'\\u270f\\ufe0f \\uc790\\ub8cc \\uc218\\uc815\\u00b7\\uc0ad\\uc81c\\u00b7\\ucd94\\uac00 \\uc694\\uccad\';">'
-            '✏️ 자료 수정·삭제·추가 요청</button>'
-            '<div class="edithint">각 자료의 “수정·삭제 요청”과 유형별 “＋ 올리기”가 아래에 나타났어요. 요청은 관리자 검토 후 반영됩니다.</div>'
-            '</div>'
-        )
     inner = (
-        f'<header><div class="badge">소방 자재승인 자료실</div><h1>{esc(info.get("name"))}</h1></header>'
+        f'<header><div class="badge">소방 자재승인 자료실</div>'
+        f'<h1>{esc(info.get("name"))}</h1>{tag_html}</header>'
         f"{banner}"
-        f"{edit_bar}"
         f'<div class="info">{info_rows}</div>'
+        f"{soban_html}"
         f"{sections}"
         f"<footer>보유 자료 {total}건 · 공개 정보를 정리한 것입니다.<br>오류·누락은 카톡 챗봇 또는 위 요청으로 알려주세요.</footer>"
     )
@@ -455,10 +518,16 @@ async def _serve(m: str, request: Request) -> HTMLResponse:
         info = mat_find(m)
     except Exception as e:  # noqa: BLE001
         return HTMLResponse(page_html("자료실", f'<section><p>일시적 오류가 발생했어요.<br><small>{esc(e)}</small></p></section>'), status_code=502)
-    if not info or info.get("matched") is not True:
+    ic = insp_lookup(m)
+    manu = bool(info and info.get("matched") is True)
+    soban = bool(ic and ic.get("matched") is True)
+    if not manu and not soban:
         return HTMLResponse(not_found(m), status_code=404)
+    if not manu:
+        # 제조사는 아니고 소방업체이기만 한 경우
+        return HTMLResponse(render_soban_only(ic))
     can = bool(check_token(tok).get("ok")) if tok else False
-    return HTMLResponse(render_manufacturer(info, token=tok, can=can, msg=msg))
+    return HTMLResponse(render_manufacturer(info, token=tok, can=can, msg=msg, ic=ic if soban else None))
 
 
 def _mid_of(info: dict) -> int:
